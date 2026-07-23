@@ -1,0 +1,46 @@
+# ==========================================
+# C++ / CMake Build Artifacts (File sinh ra khi biên dịch)
+# ==========================================
+build/
+bin/
+lib/
+*.o
+*.obj
+*.out
+*.a
+*.so
+*.dylib
+*.exe
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+CMakePostBuild.cmake
+
+# ==========================================
+# IDEs & Editors (Cấu hình riêng của máy cá nhân)
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ==========================================
+# Application Files (Dữ liệu truyền nhận thực tế)
+# ==========================================
+# Bỏ qua tất cả file dữ liệu demo trong thư mục storage để tránh nặng Git
+storage/server_files/*
+storage/client_files/*
+
+# Giữ lại file .gitkeep để Git không xóa thư mục rỗng
+!storage/server_files/.gitkeep
+!storage/client_files/.gitkeep
+
+# ==========================================
+# Logs & Temporary Files
+# ==========================================
+*.log
+*.tmp
