@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 
 #include "../../common/ftp_shared.h"
+#include "file_system.h"
 
 #define TCP_PORT 2121
 #define BUFFER_SIZE 1024
@@ -87,11 +88,14 @@ void handle_client(int client_fd) {
         // 4. PASV command
         else if (cmd == "PASV") {
             int port = udp_prepare_passive_listener(&session);
-
-            // Return passive mode information
-            send_reply(client_fd, 227, "Entering Passive Mode (127,0,0,1,195,80)");
+            
+            // Tách port thành 2 byte p1, p2 theo chuẩn FTP PASV (Port = p1 * 256 + p2)
+            int p1 = port / 256;
+            int p2 = port % 256;
+            
+            std::string pasv_msg = "Entering Passive Mode (127,0,0,1," + std::to_string(p1) + "," + std::to_string(p2) + ")";
+            send_reply(client_fd, 227, pasv_msg);
         }
-
         // 5. RETR command (Download file)
         else if (cmd == "RETR") {
             if (arg.empty()) {
@@ -121,10 +125,153 @@ void handle_client(int client_fd) {
             break;
         }
 
+        // 8. CWD command (Change Working Directory)
+        else if (cmd == "CWD") {
+
+            std::string target_path = session.current_dir + "/" + arg;
+
+            if (FileSystem::exists(target_path) && FileSystem::is_directory(target_path)) {
+
+                session.current_dir = target_path;
+
+                send_reply(client_fd, 250, "Directory successfully changed.");
+
+            } else {
+
+                send_reply(client_fd, 550, "Failed to change directory.");
+
+            }
+        }
+
+
+        // 9. CDUP command (Change to Parent Directory)
+        else if (cmd == "CDUP") {
+
+            size_t pos = session.current_dir.find_last_of("/");
+
+            if (pos != std::string::npos && pos > 0) {
+
+                session.current_dir = session.current_dir.substr(0, pos);
+
+                send_reply(client_fd, 200, "Directory changed to parent.");
+
+            } else {
+
+                send_reply(client_fd, 550, "Cannot go above root directory.");
+
+            }
+        }
+
+
+        // 10. MKD command (Make Directory)
+        else if (cmd == "MKD") {
+
+            if (arg.empty()) {
+
+                send_reply(client_fd, 501, "Syntax error in parameters.");
+
+            } else {
+
+                std::string new_dir = session.current_dir + "/" + arg;
+
+                if (FileSystem::create_directory(new_dir)) {
+
+                    send_reply(client_fd, 257, "\"" + arg + "\" directory created.");
+
+                } else {
+
+                    send_reply(client_fd, 550, "Create directory failed.");
+
+                }
+            }
+        }
+
+
+        // 11. RMD command (Remove Directory)
+        else if (cmd == "RMD") {
+
+            if (arg.empty()) {
+
+                send_reply(client_fd, 501, "Syntax error in parameters.");
+
+            } else {
+
+                std::string target_dir = session.current_dir + "/" + arg;
+
+                if (FileSystem::remove_directory(target_dir)) {
+
+                    send_reply(client_fd, 250, "Remove directory operation successful.");
+
+                } else {
+
+                    send_reply(client_fd, 550, 
+                        "Remove directory failed (Directory not empty or not found).");
+
+                }
+            }
+        }
+
+
+        // 12. LIST command (List directory contents)
+        else if (cmd == "LIST") {
+
+            send_reply(client_fd, 150, 
+                "Opening ASCII mode data connection for file list.");
+
+            std::string listing = 
+                FileSystem::get_directory_listing(session.current_dir);
+
+            // Send directory listing through UDP data channel
+            TransferResult res = 
+                udp_send_buffer(&session, listing.c_str(), listing.length());
+
+            if (res.is_success) {
+
+                send_reply(client_fd, 226, "Transfer complete.");
+
+            } else {
+
+                send_reply(client_fd, 425, "Can't open data connection.");
+
+            }
+        }
+
+
+        // 13. HASH command (Calculate SHA-256 checksum)
+        else if (cmd == "HASH") {
+
+            if (arg.empty()) {
+
+                send_reply(client_fd, 501, "Syntax error in parameters.");
+
+            } else {
+
+                std::string file_path = session.current_dir + "/" + arg;
+
+                std::string hash_val = 
+                    FileSystem::calculate_sha256(file_path);
+
+                if (!hash_val.empty()) {
+
+                    send_reply(client_fd, 
+                        200, 
+                        "SHA-256 " + arg + " " + hash_val);
+
+                } else {
+
+                    send_reply(client_fd, 
+                        550, 
+                        "File unavailable or not found.");
+
+                }
+            }
+        }
         // Unsupported command
         else {
             send_reply(client_fd, 502, "Command not implemented.");
         }
+
+
     }
 
     close(client_fd);

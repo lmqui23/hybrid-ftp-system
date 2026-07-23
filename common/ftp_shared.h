@@ -30,9 +30,15 @@ struct FTPSession {
     int data_port;              
     TransferType type;          
 
-    FTPSession(int fd) : client_tcp_fd(fd), is_authenticated(false), 
-                         current_dir("./storage/server_files"), 
-                         mode(MODE_NONE), type(TYPE_BINARY), data_port(0) {}
+    FTPSession(int fd) 
+    : client_tcp_fd(fd), 
+      username(""), 
+      is_authenticated(false), 
+      current_dir("./storage/server_files"), 
+      mode(MODE_NONE), 
+      data_ip(""), 
+      data_port(0),        
+      type(TYPE_BINARY) {} 
 };
 
 // Result returned from UDP engine to TCP engine
@@ -64,12 +70,17 @@ inline void udp_set_active_target(FTPSession* session, const std::string& ip, in
 }
 
 inline TransferResult udp_send_file(FTPSession* session, const std::string& filepath) {
-    // Temporary mock for TCP flow testing
+    (void)session; (void)filepath;
     return TransferResult(true, 1024, 0, "Success");
 }
 
 inline TransferResult udp_receive_file(FTPSession* session, const std::string& filepath, bool is_append) {
+    (void)session; (void)filepath; (void)is_append;
     return TransferResult(true, 1024, 0, "Success");
 }
 
+inline TransferResult udp_send_buffer(FTPSession* session, const char* buffer, size_t len) {
+    (void)session; (void)buffer; (void)len; // avoid warning unused-parameter
+    return TransferResult(true, len, 0, "Success");
+}
 #endif // FTP_SHARED_H
