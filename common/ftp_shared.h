@@ -3,6 +3,7 @@
 
 #include <string>
 #include <cstddef>
+#include <cstdlib> // Cho hàm realpath()
 
 // Data transfer mode
 enum DataMode {
@@ -19,26 +20,35 @@ enum TransferType {
 
 // Store client FTP session information
 struct FTPSession {
-    int client_tcp_fd;          
+    int control_fd;        // Socket FD cho TCP Control (Dùng khớp với tcp_server.cpp)
+    std::string client_ip; // Client IP
+    int client_port;
+    
     std::string username;
-    bool is_authenticated;      
-    std::string current_dir;    
+    bool is_authenticated;
+    
+    std::string root_dir; 
+    std::string current_dir; 
 
-    // UDP data channel configuration
     DataMode mode;
-    std::string data_ip;        
-    int data_port;              
-    TransferType type;          
+    std::string data_ip;
+    int data_port;
+    TransferType type;
+    std::string rename_from_path;
 
-    FTPSession(int fd) 
-    : client_tcp_fd(fd), 
-      username(""), 
-      is_authenticated(false), 
-      current_dir("./storage/server_files"), 
-      mode(MODE_NONE), 
-      data_ip(""), 
-      data_port(0),        
-      type(TYPE_BINARY) {} 
+    FTPSession(int fd, std::string ip = "127.0.0.1", int port = 0) 
+        : control_fd(fd), client_ip(ip), client_port(port),
+          username(""), is_authenticated(false),
+          mode(MODE_NONE), data_ip(""), data_port(0), type(TYPE_BINARY), rename_from_path("") {
+        
+        char abs_path[1024];
+        if (realpath("./storage/server_files", abs_path) != nullptr) {
+            root_dir = std::string(abs_path);
+        } else {
+            root_dir = "./storage/server_files";
+        }
+        current_dir = root_dir;
+    }
 };
 
 // Result returned from UDP engine to TCP engine
@@ -83,4 +93,14 @@ inline TransferResult udp_send_buffer(FTPSession* session, const char* buffer, s
     (void)session; (void)buffer; (void)len; // avoid warning unused-parameter
     return TransferResult(true, len, 0, "Success");
 }
+
+// Interface hủy truyền tải UDP
+inline void udp_abort_transfer(FTPSession* session) {
+    session->mode = MODE_NONE;
+    
+    // ĐỐI VỚI ĐỒNG ĐỘI (UDP DEV):
+    // Người làm UDP sẽ thêm Atomic Flag: std::atomic<bool> is_aborted{false};
+    // Hàm này sẽ set: session->is_aborted = true; để vỡ vòng lặp gửi/nhận UDP ngay lập tức.
+}
+
 #endif // FTP_SHARED_H
