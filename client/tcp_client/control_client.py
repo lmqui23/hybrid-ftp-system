@@ -2,6 +2,7 @@ import os
 import sys
 import socket
 import re
+import threading
 from pathlib import Path
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +17,7 @@ from common.ftp_shared import (
     udp_client_send_file,
     udp_client_prepare_active,
     udp_client_set_passive,
+    udp_client_abort_transfer,
 )
 
 DEFAULT_PORT = 2121
@@ -28,6 +30,8 @@ class FTPClient:
         self.tcp_sock: socket.socket | None = None
         self.connected: bool = False
         self.data_mode: str | None = None
+        self.reader = None
+        self.transfer_thread: threading.Thread | None = None
 
     @staticmethod
     def _parse_transfer_metadata(response: str):
@@ -79,14 +83,24 @@ class FTPClient:
         return project_root / "storage" / "client_files" / argument
 
     def _receive_response(self) -> str:
-        if not self.tcp_sock:
+        if self.reader is None:
             return ""
         try:
-            data = self.tcp_sock.recv(BUFFER_SIZE)
-            if not data:
+            first = self.reader.readline()
+            if not first:
                 self.connected = False
                 return ""
-            return data.decode('utf-8', errors='ignore')
+            response = first
+            if len(first) >= 4 and first[:3].isdigit() and first[3] == "-":
+                final_prefix = first[:3] + " "
+                while True:
+                    line = self.reader.readline()
+                    if not line:
+                        break
+                    response += line
+                    if line.startswith(final_prefix):
+                        break
+            return response
         except Exception:
             self.connected = False
             return ""
@@ -96,8 +110,8 @@ class FTPClient:
             return False
         full_cmd = cmd + "\r\n"
         try:
-            bytes_sent = self.tcp_sock.send(full_cmd.encode('utf-8'))
-            return bytes_sent > 0
+            self.tcp_sock.sendall(full_cmd.encode('utf-8'))
+            return True
         except Exception:
             return False
 
@@ -186,6 +200,12 @@ class FTPClient:
         try:
             self.tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.tcp_sock.connect((ip, port))
+            self.reader = self.tcp_sock.makefile(
+                "r",
+                encoding="utf-8",
+                errors="ignore",
+                newline="",
+            )
             self.connected = True
 
             welcome_msg = self._receive_response()
@@ -195,15 +215,31 @@ class FTPClient:
             print(f"[Error] Connection to server failed: {e}")
             if self.tcp_sock:
                 self.tcp_sock.close()
+            if self.reader:
+                self.reader.close()
+                self.reader = None
             return False
 
     def disconnect(self) -> None:
         if self.connected:
+            if self.transfer_thread and self.transfer_thread.is_alive():
+                self._send_command("ABOR")
+                udp_client_abort_transfer()
+                self.transfer_thread.join(timeout=3)
             self._send_command("QUIT")
             print(self._receive_response(), end="")
+            if self.reader:
+                self.reader.close()
+                self.reader = None
             if self.tcp_sock:
                 self.tcp_sock.close()
             self.connected = False
+
+    def _run_transfer(self, command: str) -> None:
+        try:
+            self.handle_data_transfer(command)
+        finally:
+            self.transfer_thread = None
 
     def run_cli(self) -> None:
         print("====================================================")
@@ -225,6 +261,21 @@ class FTPClient:
                 parts = user_input.split()
                 cmd = parts[0].upper()
 
+                transfer_running = (
+                    self.transfer_thread is not None
+                    and self.transfer_thread.is_alive()
+                )
+
+                if cmd == "ABOR" and transfer_running:
+                    if self._send_command("ABOR"):
+                        udp_client_abort_transfer()
+                        print("[Client] Abort requested.")
+                    continue
+
+                if transfer_running:
+                    print("[Client] Transfer in progress. Use ABOR or wait.")
+                    continue
+
                 if cmd in ("EXIT", "QUIT"):
                     self.disconnect()
                     break
@@ -234,7 +285,12 @@ class FTPClient:
                 elif cmd == "PORT":
                     self._enter_active()
                 elif cmd in ("LIST", "NLST", "RETR", "STOR", "APPE", "STOU"):
-                    self.handle_data_transfer(user_input)
+                    self.transfer_thread = threading.Thread(
+                        target=self._run_transfer,
+                        args=(user_input,),
+                        daemon=True,
+                    )
+                    self.transfer_thread.start()
                 else:
                     if self._send_command(user_input):
                         response = self._receive_response()

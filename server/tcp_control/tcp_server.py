@@ -28,8 +28,11 @@ from common.ftp_shared import (
     udp_abort_transfer
 )
 
-CONTROL_PORT = 2121
+CONTROL_PORT = int(os.getenv("FTP_CONTROL_PORT", "2121"))
 BUFFER_SIZE = 1024
+ACTIVE_SESSIONS: dict[int, FTPSession] = {}
+SESSIONS_LOCK = threading.Lock()
+REPLY_LOCKS: dict[int, threading.Lock] = {}
 
 def get_current_timestamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -40,9 +43,44 @@ def log_server(level: str, client_fd: int, message: str) -> None:
 def send_reply(client_sock: socket.socket, client_fd: int, code: int, message: str) -> None:
     response = f"{code} {message}\r\n".encode('utf-8')
     try:
-        client_sock.sendall(response)
+        lock = REPLY_LOCKS.setdefault(client_fd, threading.Lock())
+        with lock:
+            client_sock.sendall(response)
     except Exception as e:
         log_server("ERROR", client_fd, f"Failed to send response or client disconnected: {e}")
+
+
+def send_multiline_reply(
+    client_sock: socket.socket,
+    client_fd: int,
+    code: int,
+    lines: list[str],
+) -> None:
+    payload = (
+        f"{code}-{lines[0]}\r\n"
+        + "".join(f"{line}\r\n" for line in lines[1:])
+        + f"{code} End\r\n"
+    ).encode("utf-8")
+    lock = REPLY_LOCKS.setdefault(client_fd, threading.Lock())
+    with lock:
+        client_sock.sendall(payload)
+
+
+def log_session_table() -> None:
+    with SESSIONS_LOCK:
+        sessions = list(ACTIVE_SESSIONS.values())
+    print("[ACTIVE SESSIONS]")
+    print("FD   CLIENT                  USER        MODE     TRANSFER")
+    for item in sessions:
+        mode = item.mode.name.removeprefix("MODE_")
+        print(
+            f"{item.control_fd:<4} "
+            f"{item.client_ip + ':' + str(item.client_port):<23} "
+            f"{(item.username or '-'):11} {mode:8} "
+            f"{'ACTIVE' if item.transfer_active else 'IDLE'}"
+        )
+    if not sessions:
+        print("(none)")
 
 
 def parse_upload_metadata(arg: str) -> tuple[str, int, str] | None:
@@ -73,10 +111,14 @@ def start_transfer(
     job,
 ) -> None:
     session.transfer_active = True
+    session.abort_requested = False
+    log_session_table()
 
     def worker() -> None:
         try:
             result = job()
+            if session.abort_requested:
+                return
             if result.is_success:
                 send_reply(client_sock, client_fd, 226, "Transfer complete.")
             else:
@@ -88,6 +130,8 @@ def start_transfer(
                 )
         finally:
             session.transfer_active = False
+            session.abort_requested = False
+            log_session_table()
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -140,6 +184,10 @@ def get_local_ip(client_sock: socket.socket) -> str:
 def handle_client_session(client_sock: socket.socket, client_ip: str, client_port: int) -> None:
     client_fd = client_sock.fileno()
     session = FTPSession(client_fd, client_ip, client_port)
+    reader = client_sock.makefile("r", encoding="utf-8", errors="ignore", newline="")
+    with SESSIONS_LOCK:
+        ACTIVE_SESSIONS[client_fd] = session
+    log_session_table()
 
     # Đặt root_dir trỏ mặc định vào storage/server_files
     storage_server = os.path.abspath(os.path.join(PROJECT_ROOT, "storage", "server_files"))
@@ -152,12 +200,12 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
 
     try:
         while True:
-            data = client_sock.recv(BUFFER_SIZE)
-            if not data:
+            request = reader.readline()
+            if not request:
                 log_server("INFO", client_fd, "Client disconnected or connection lost.")
                 break
 
-            request = data.decode('utf-8', errors='ignore').rstrip("\r\n")
+            request = request.rstrip("\r\n")
             if not request:
                 continue
 
@@ -184,6 +232,7 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                 elif file_system.verify_user_credentials(session.username, arg):
                     session.is_authenticated = True
                     log_server("INFO", client_fd, f"User '{session.username}' authenticated successfully.")
+                    log_session_table()
                     send_reply(client_sock, client_fd, 230, "User logged in, proceed.")
                 else:
                     log_server("WARN", client_fd, f"Authentication failed for user '{session.username}'")
@@ -305,7 +354,11 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                     session,
                     client_sock,
                     client_fd,
-                    lambda: udp_send_buffer(session, payload, transfer_id),
+                    lambda data=payload, tid=transfer_id: udp_send_buffer(
+                        session,
+                        data,
+                        tid,
+                    ),
                 )
 
             elif cmd == "STAT":
@@ -377,10 +430,10 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                         session,
                         client_sock,
                         client_fd,
-                        lambda: udp_send_file(
+                        lambda path=target_path, tid=transfer_id: udp_send_file(
                             session,
-                            target_path,
-                            transfer_id,
+                            path,
+                            tid,
                         ),
                     )
 
@@ -417,13 +470,15 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                     session,
                     client_sock,
                     client_fd,
-                    lambda: udp_receive_file(
+                    lambda path=target_path, tid=transfer_id,
+                    size=expected_size, digest=expected_hash,
+                    append=is_append: udp_receive_file(
                         session,
-                        target_path,
-                        transfer_id,
-                        expected_size,
-                        expected_hash,
-                        is_append,
+                        path,
+                        tid,
+                        size,
+                        digest,
+                        append,
                     ),
                 )
 
@@ -467,10 +522,39 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                     send_reply(client_sock, client_fd, 504, "Bad MODE parameter.")
 
             elif cmd == "ABOR":
-                udp_abort_transfer(session)
-                send_reply(client_sock, client_fd, 226, "Abort command successful.")
+                if session.transfer_active:
+                    udp_abort_transfer(session)
+                    send_reply(client_sock, client_fd, 426, "Transfer aborted.")
+                else:
+                    send_reply(client_sock, client_fd, 225, "No transfer in progress.")
+
+            elif cmd == "HELP":
+                details = {
+                    "RETR": "RETR <filename> - download a file through UDP RDT.",
+                    "STOR": "STOR <filename> - upload a file through UDP RDT.",
+                    "PASV": "PASV - select Passive data mode.",
+                    "PORT": "PORT - select Active data mode.",
+                    "ABOR": "ABOR - cancel the active data transfer.",
+                }
+                if arg.upper() in details:
+                    send_reply(client_sock, client_fd, 214, details[arg.upper()])
+                else:
+                    send_multiline_reply(
+                        client_sock,
+                        client_fd,
+                        214,
+                        [
+                            "Supported commands",
+                            "USER PASS QUIT NOOP HELP",
+                            "PWD CWD CDUP MKD RMD LIST NLST STAT",
+                            "SIZE MDTM TYPE MODE PORT PASV",
+                            "RETR STOR STOU APPE DELE RNFR RNTO HASH ABOR",
+                        ],
+                    )
 
             elif cmd == "QUIT":
+                if session.transfer_active:
+                    udp_abort_transfer(session)
                 log_server("INFO", client_fd, "Client requested disconnection (QUIT).")
                 send_reply(client_sock, client_fd, 221, "Goodbye.")
                 break
@@ -482,7 +566,12 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
     except Exception as e:
         log_server("ERROR", client_fd, f"Exception in session loop: {e}")
     finally:
+        reader.close()
         client_sock.close()
+        with SESSIONS_LOCK:
+            ACTIVE_SESSIONS.pop(client_fd, None)
+        REPLY_LOCKS.pop(client_fd, None)
+        log_session_table()
         log_server("INFO", client_fd, "Session closed.")
 
 def main():
