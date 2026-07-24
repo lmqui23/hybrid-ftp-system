@@ -1,27 +1,33 @@
 # ==========================================
-# C++ / CMake Build Artifacts (File sinh ra khi biên dịch)
+# Python Bytecode & Cache
 # ==========================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ==========================================
+# Python Virtual Environment
+# ==========================================
+
+.venv/
+venv/
+env/
+ENV/
+
+# ==========================================
+# Python Packaging
+# ==========================================
+
 build/
-bin/
-lib/
-*.o
-*.obj
-*.out
-*.a
-*.so
-*.dylib
-*.exe
-
-# CMake generated files
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile
-CMakePostBuild.cmake
+dist/
+*.egg-info/
+.eggs/
 
 # ==========================================
-# IDEs & Editors (Cấu hình riêng của máy cá nhân)
+# IDEs & Editors
 # ==========================================
+
 .vscode/
 .idea/
 *.swp
@@ -29,18 +35,34 @@ CMakePostBuild.cmake
 .DS_Store
 
 # ==========================================
-# Application Files (Dữ liệu truyền nhận thực tế)
+# Application Files
 # ==========================================
-# Bỏ qua tất cả file dữ liệu demo trong thư mục storage để tránh nặng Git
+
+# Không đưa dữ liệu test lên Git
 storage/server_files/*
 storage/client_files/*
 
-# Giữ lại file .gitkeep để Git không xóa thư mục rỗng
+# Giữ lại thư mục rỗng
 !storage/server_files/.gitkeep
 !storage/client_files/.gitkeep
 
 # ==========================================
 # Logs & Temporary Files
 # ==========================================
+
 *.log
 *.tmp
+
+# ==========================================
+# Test & Coverage
+# ==========================================
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ==========================================
+# Jupyter Notebook
+# ==========================================
+
+.ipynb_checkpoints/
