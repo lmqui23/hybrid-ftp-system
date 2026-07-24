@@ -3,6 +3,8 @@ import sys
 import socket
 import datetime
 import threading
+import hashlib
+import secrets
 
 # Thêm đường dẫn gốc của dự án và thư mục hiện tại vào sys.path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +43,53 @@ def send_reply(client_sock: socket.socket, client_fd: int, code: int, message: s
         client_sock.sendall(response)
     except Exception as e:
         log_server("ERROR", client_fd, f"Failed to send response or client disconnected: {e}")
+
+
+def parse_upload_metadata(arg: str) -> tuple[str, int, str] | None:
+    parts = arg.split()
+    if len(parts) < 2:
+        return None
+
+    values = {}
+    while parts and "=" in parts[-1]:
+        key, value = parts.pop().split("=", 1)
+        values[key.upper()] = value
+
+    try:
+        size = int(values["SIZE"])
+        file_hash = values["SHA256"].lower()
+    except (KeyError, ValueError):
+        return None
+
+    if size < 0 or len(file_hash) != 64:
+        return None
+    return " ".join(parts), size, file_hash
+
+
+def start_transfer(
+    session: FTPSession,
+    client_sock: socket.socket,
+    client_fd: int,
+    job,
+) -> None:
+    session.transfer_active = True
+
+    def worker() -> None:
+        try:
+            result = job()
+            if result.is_success:
+                send_reply(client_sock, client_fd, 226, "Transfer complete.")
+            else:
+                send_reply(
+                    client_sock,
+                    client_fd,
+                    426,
+                    f"Transfer aborted: {result.error_msg}",
+                )
+        finally:
+            session.transfer_active = False
+
+    threading.Thread(target=worker, daemon=True).start()
 
 def get_ftp_path(full_path: str, root_dir: str) -> str:
     if full_path == root_dir:
@@ -118,6 +167,13 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
 
             log_server("INFO", client_fd, f"Command received: {cmd}" + (f" {arg}" if arg else ""))
 
+            if (
+                session.transfer_active
+                and cmd not in ("ABOR", "NOOP", "QUIT")
+            ):
+                send_reply(client_sock, client_fd, 450, "Transfer in progress.")
+                continue
+
             if cmd == "USER":
                 session.username = arg
                 send_reply(client_sock, client_fd, 331, "User name okay, need password.")
@@ -139,6 +195,9 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
 
             elif cmd == "PASV":
                 port = udp_prepare_passive_listener(session)
+                if port == 0:
+                    send_reply(client_sock, client_fd, 425, "Cannot open data connection.")
+                    continue
                 local_ip = get_local_ip(client_sock)
                 pasv_ip = local_ip.replace('.', ',')
                 pasv_msg = f"Entering Passive Mode ({pasv_ip},{port // 256},{port % 256})"
@@ -223,20 +282,31 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                     send_reply(client_sock, client_fd, 550, "Remove directory failed. Directory might not be empty.")
 
             elif cmd in ("LIST", "NLST"):
+                if session.mode == DataMode.MODE_NONE:
+                    send_reply(client_sock, client_fd, 425, "Use PASV or PORT first.")
+                    continue
                 valid, target_path = resolve_safe_path(session.current_dir, arg, session.root_dir)
                 if not valid or not file_system.is_directory(target_path):
                     send_reply(client_sock, client_fd, 550, "Directory not found or access denied.")
                     continue
 
-                send_reply(client_sock, client_fd, 150, "File status okay; about to open data connection.")
                 listing = (file_system.get_directory_listing(target_path) if cmd == "LIST" 
                            else file_system.get_simple_listing(target_path))
-
-                res = udp_send_buffer(session, listing.encode('utf-8'))
-                if res.is_success:
-                    send_reply(client_sock, client_fd, 226, "Closing data connection. Transfer successful.")
-                else:
-                    send_reply(client_sock, client_fd, 426, "Data connection closed; transfer aborted.")
+                payload = listing.encode("utf-8")
+                transfer_id = secrets.randbits(64)
+                file_hash = hashlib.sha256(payload).hexdigest()
+                send_reply(
+                    client_sock,
+                    client_fd,
+                    150,
+                    f"TID={transfer_id} SIZE={len(payload)} SHA256={file_hash}",
+                )
+                start_transfer(
+                    session,
+                    client_sock,
+                    client_fd,
+                    lambda: udp_send_buffer(session, payload, transfer_id),
+                )
 
             elif cmd == "STAT":
                 if not arg:
@@ -285,37 +355,77 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                         send_reply(client_sock, client_fd, 550, "Failed to calculate hash.")
 
             elif cmd == "RETR":
+                if session.mode == DataMode.MODE_NONE:
+                    send_reply(client_sock, client_fd, 425, "Use PASV or PORT first.")
+                    continue
                 valid, target_path = resolve_safe_path(session.current_dir, arg, session.root_dir)
                 if not valid:
                     send_reply(client_sock, client_fd, 550, "Access denied. Path traversal blocked.")
                 elif not file_system.exists(target_path) or file_system.is_directory(target_path):
                     send_reply(client_sock, client_fd, 550, "File not found or is a directory.")
                 else:
-                    send_reply(client_sock, client_fd, 150, "Opening data connection for file download.")
-                    res = udp_send_file(session, target_path)
-                    if res.is_success:
-                        send_reply(client_sock, client_fd, 226, "Transfer complete.")
-                    else:
-                        send_reply(client_sock, client_fd, 426, f"Transfer aborted: {res.error_msg}")
+                    transfer_id = secrets.randbits(64)
+                    size = file_system.get_file_size(target_path)
+                    file_hash = file_system.calculate_sha256(target_path)
+                    send_reply(
+                        client_sock,
+                        client_fd,
+                        150,
+                        f"TID={transfer_id} SIZE={size} SHA256={file_hash}",
+                    )
+                    start_transfer(
+                        session,
+                        client_sock,
+                        client_fd,
+                        lambda: udp_send_file(
+                            session,
+                            target_path,
+                            transfer_id,
+                        ),
+                    )
 
             elif cmd in ("STOR", "APPE", "STOU"):
+                if session.mode == DataMode.MODE_NONE:
+                    send_reply(client_sock, client_fd, 425, "Use PASV or PORT first.")
+                    continue
+                metadata = parse_upload_metadata(arg)
+                if metadata is None:
+                    send_reply(client_sock, client_fd, 501, "Upload requires SIZE and SHA256.")
+                    continue
+                upload_name, expected_size, expected_hash = metadata
+                transfer_id = secrets.randbits(64)
                 if cmd == "STOU":
                     unique_name = file_system.generate_unique_filename(session.current_dir, session.control_fd)
                     target_path = os.path.join(session.current_dir, unique_name)
-                    send_reply(client_sock, client_fd, 150, f"FILE: {unique_name}")
+                    extra = f" FILE={unique_name}"
                 else:
-                    valid, target_path = resolve_safe_path(session.current_dir, arg, session.root_dir)
+                    valid, target_path = resolve_safe_path(session.current_dir, upload_name, session.root_dir)
                     if not valid:
                         send_reply(client_sock, client_fd, 550, "Access denied. Invalid target path.")
                         continue
-                    send_reply(client_sock, client_fd, 150, "Opening data connection for file upload.")
+                    extra = ""
 
                 is_append = (cmd == "APPE")
-                res = udp_receive_file(session, target_path, is_append)
-                if res.is_success:
-                    send_reply(client_sock, client_fd, 226, "Transfer complete.")
-                else:
-                    send_reply(client_sock, client_fd, 426, f"Transfer aborted: {res.error_msg}")
+                send_reply(
+                    client_sock,
+                    client_fd,
+                    150,
+                    f"TID={transfer_id} SIZE={expected_size} "
+                    f"SHA256={expected_hash}{extra}",
+                )
+                start_transfer(
+                    session,
+                    client_sock,
+                    client_fd,
+                    lambda: udp_receive_file(
+                        session,
+                        target_path,
+                        transfer_id,
+                        expected_size,
+                        expected_hash,
+                        is_append,
+                    ),
+                )
 
             elif cmd == "DELE":
                 valid, target_path = resolve_safe_path(session.current_dir, arg, session.root_dir)

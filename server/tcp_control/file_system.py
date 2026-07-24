@@ -21,9 +21,9 @@ def verify_user_credentials(username: str, password: str) -> bool:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                parts = line.split()
-                if len(parts) >= 2:
-                    u, p = parts[0], parts[1]
+                parts = line.split(":", 1) if ":" in line else line.split()
+                if len(parts) == 2:
+                    u, p = parts
                     if u == username and p == password:
                         return True
     except Exception:
