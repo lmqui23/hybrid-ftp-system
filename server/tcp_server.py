@@ -8,18 +8,12 @@ import secrets
 
 # Thêm đường dẫn gốc của dự án và thư mục hiện tại vào sys.path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-if CURRENT_DIR not in sys.path:
-    sys.path.insert(0, CURRENT_DIR)
 
-# Import các module theo đúng cấu trúc thư mục
-import file_system
-from common.ftp_shared import (
-    FTPSession,
-    DataMode,
-    TransferType,
+# Import các module theo đúng cấu trúc thư mục.
+from common.data_transfer import (
     udp_prepare_passive_listener,
     udp_set_active_target,
     udp_send_buffer,
@@ -27,6 +21,8 @@ from common.ftp_shared import (
     udp_receive_file,
     udp_abort_transfer
 )
+from common.session import DataMode, FTPSession, TransferType
+from server import file_system
 
 CONTROL_PORT = int(os.getenv("FTP_CONTROL_PORT", "2121"))
 BUFFER_SIZE = 1024

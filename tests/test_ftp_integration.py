@@ -10,8 +10,8 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from client.tcp_client.control_client import FTPClient
-from common.ftp_shared import udp_client_abort_transfer
+from client.control_client import FTPClient
+from common.data_transfer import udp_client_abort_transfer
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +34,7 @@ class FTPIntegrationTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["FTP_CONTROL_PORT"] = str(cls.port)
         cls.server = subprocess.Popen(
-            [sys.executable, "server/tcp_control/tcp_server.py"],
+            [sys.executable, "server/tcp_server.py"],
             cwd=ROOT,
             env=environment,
             stdout=subprocess.DEVNULL,
@@ -212,7 +212,7 @@ class FTPIntegrationTests(unittest.TestCase):
 
             script = (
                 "import sys;"
-                "from client.tcp_client.control_client import FTPClient;"
+                "from client.control_client import FTPClient;"
                 "c=FTPClient();"
                 "assert c.connect_to_server('127.0.0.1',int(sys.argv[1]));"
                 "assert c._send_command('USER admin');c._receive_response();"

@@ -60,7 +60,7 @@ class FTPCommandTests(unittest.TestCase):
         environment = os.environ.copy()
         environment["FTP_CONTROL_PORT"] = str(cls.port)
         cls.server = subprocess.Popen(
-            [sys.executable, "server/tcp_control/tcp_server.py"],
+            [sys.executable, "server/tcp_server.py"],
             cwd=ROOT,
             env=environment,
             stdout=subprocess.DEVNULL,

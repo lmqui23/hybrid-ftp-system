@@ -1,10 +1,12 @@
+"""Filesystem operations constrained to the configured FTP storage root."""
+
 import os
 import time
 import hashlib
 import stat
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 
 USERS_FILE = os.path.join(PROJECT_ROOT, "storage", "users.txt")
 if not os.path.exists(USERS_FILE):

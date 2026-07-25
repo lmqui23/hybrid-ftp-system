@@ -6,12 +6,12 @@ import threading
 from pathlib import Path
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from protocol.file_hash import sha256_file
-from common.ftp_shared import (
+from common.data_transfer import (
     udp_client_receive_buffer,
     udp_client_receive_file,
     udp_client_send_file,
@@ -79,7 +79,7 @@ class FTPClient:
         direct = Path(argument)
         if direct.is_file():
             return direct
-        project_root = Path(__file__).resolve().parents[2]
+        project_root = Path(__file__).resolve().parents[1]
         return project_root / "storage" / "client_files" / argument
 
     def _receive_response(self) -> str:
@@ -176,7 +176,7 @@ class FTPClient:
                 if data:
                     print(data.decode('utf-8', errors='ignore'))
             elif cmd == "RETR":
-                project_root = Path(__file__).resolve().parents[2]
+                project_root = Path(__file__).resolve().parents[1]
                 save_path = (
                     project_root
                     / "storage"
