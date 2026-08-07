@@ -4,6 +4,7 @@ import os
 import time
 import hashlib
 import stat
+from pathlib import Path
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
@@ -100,17 +101,30 @@ def rename_path(old_path: str, new_path: str) -> bool:
         return False
 
 
-def generate_unique_filename(base_dir: str, prefix_id: int) -> str:
+def generate_unique_filename(
+    base_dir: str,
+    prefix_id: int,
+    original_filename: str = "",
+) -> str:
+    clean_name = original_filename.strip() if original_filename else ""
+
+    # Lấy extension từ tên file gốc
+    ext = Path(clean_name).suffix if clean_name else ""
+
     timestamp = int(time.time())
     count = 0
+
     while True:
-        name = f"stou_{prefix_id}_{timestamp}_{count}.tmp"
+        name = f"stou_{prefix_id}_{timestamp}_{count}{ext}"
         full_path = os.path.join(base_dir, name)
-        if not os.path.exists(full_path):
+
+        if not os.path.exists(full_path) and not any(
+            Path(base_dir).glob(f"{name}.upload.*")
+        ):
             return name
+
         count += 1
-
-
+        
 def get_directory_listing(dir_path: str) -> str:
     lines = []
     try:

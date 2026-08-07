@@ -4,6 +4,7 @@ import socket
 import datetime
 import threading
 import hashlib
+from pathlib import Path
 import secrets
 
 # Thêm đường dẫn gốc của dự án và thư mục hiện tại vào sys.path
@@ -177,6 +178,17 @@ def get_local_ip(client_sock: socket.socket) -> str:
     except Exception:
         return "127.0.0.1"
 
+def send_multiline_reply(sock, fd, code, lines):
+    message = f"{code}-{lines[0]}\r\n"
+
+    for line in lines[1:]:
+        message += f"{line}\r\n"
+
+    message += f"{code} End of status.\r\n"
+
+    sock.sendall(message.encode("utf-8"))
+
+    
 def handle_client_session(client_sock: socket.socket, client_ip: str, client_port: int) -> None:
     client_fd = client_sock.fileno()
     session = FTPSession(client_fd, client_ip, client_port)
@@ -358,17 +370,87 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                 )
 
             elif cmd == "STAT":
-                if not arg:
-                    mode_str = "PASV" if session.mode == DataMode.MODE_PASSIVE else "ACTIVE"
-                    status = f"Server status: Connected\r\nMode: {mode_str}\r\nUser: {session.username}"
-                    send_reply(client_sock, client_fd, 211, status)
+                if not session.is_authenticated:
+                    send_reply(
+                        client_sock,
+                        client_fd,
+                        530,
+                        "Please login with USER and PASS.",
+                    )
+
+                elif not arg:
+                    mode_str = (
+                        "PASV"
+                        if session.mode == DataMode.MODE_PASSIVE
+                        else "ACTIVE"
+                    )
+
+                    # FTP multi-line response
+                    response = (
+                        f"211-Server status: Connected\r\n"
+                        f"Mode: {mode_str}\r\n"
+                        f"User: {session.username or '-'}\r\n"
+                        f"211 End of status.\r\n"
+                    )
+
+                    client_sock.sendall(response.encode("utf-8"))
+
                 else:
-                    valid, target_path = resolve_safe_path(session.current_dir, arg, session.root_dir)
-                    if not valid:
-                        send_reply(client_sock, client_fd, 550, "Directory not found.")
+                    valid, target_path = resolve_safe_path(
+                        session.current_dir,
+                        arg,
+                        session.root_dir,
+                    )
+
+                    if not valid or not file_system.exists(target_path):
+                        send_reply(
+                            client_sock,
+                            client_fd,
+                            550,
+                            "File or directory not found.",
+                        )
+
                     else:
-                        listing = file_system.get_directory_listing(target_path)
-                        send_reply(client_sock, client_fd, 213, f"Status follows:\r\n{listing}End of status.")
+                        if file_system.is_directory(target_path):
+                            listing = file_system.get_directory_listing(target_path)
+
+                            response = (
+                                f"213-Status follows:\r\n"
+                                f"{listing}"
+                                f"213 End of status.\r\n"
+                            )
+
+                            client_sock.sendall(response.encode("utf-8"))
+
+                        else:
+                            size = file_system.get_file_size(target_path)
+                            mtime = file_system.get_file_mtime(target_path)
+                            sha = file_system.calculate_sha256(target_path)
+
+                            mtime_line = (
+                                f"Modify: {mtime}"
+                                if mtime
+                                else "Modify: unknown"
+                            )
+
+                            sha_line = (
+                                f"SHA-256: {sha}"
+                                if sha
+                                else "SHA-256: unknown"
+                            )
+
+                            response = (
+                                f"213-Status follows:\r\n"
+                                f"Size: {size}\r\n"
+                                f"{mtime_line}\r\n"
+                                f"{sha_line}\r\n"
+                                f"213 End of status.\r\n"
+                            )
+
+                            client_sock.sendall(response.encode("utf-8"))
+
+            
+
 
             elif cmd == "SIZE":
                 valid, target_path = resolve_safe_path(session.current_dir, arg, session.root_dir)
@@ -414,61 +496,120 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                     send_reply(client_sock, client_fd, 550, "File not found or is a directory.")
                 else:
                     transfer_id = secrets.randbits(64)
-                    size = file_system.get_file_size(target_path)
-                    file_hash = file_system.calculate_sha256(target_path)
+                    
+                    # Nếu là TYPE A (ASCII): Tạo file tạm đã convert newline trước khi gửi
+                    if session.type == TransferType.TYPE_ASCII:
+                        import tempfile
+
+                        data = Path(target_path).read_bytes()
+                        normalized = data.replace(b"\r\n", b"\n")
+                        network = normalized.replace(b"\n", b"\r\n")
+                        
+                        tmp = tempfile.NamedTemporaryFile(delete=False)
+                        try:
+                            tmp.write(network)
+                            tmp.flush()
+                            send_file_path = tmp.name
+                        finally:
+                            tmp.close()
+
+                        # Tính Size và Hash TRÊN DỮ LIỆU CHUẨN MẠNG (\r\n) sẽ gửi đi
+                        size = len(network)
+                        file_hash = hashlib.sha256(network).hexdigest()
+                        is_temp = True
+                    else:
+                        send_file_path = target_path
+                        size = file_system.get_file_size(target_path)
+                        file_hash = file_system.calculate_sha256(target_path)
+                        is_temp = False
+
                     send_reply(
                         client_sock,
                         client_fd,
                         150,
                         f"TID={transfer_id} SIZE={size} SHA256={file_hash}",
                     )
+
+                    def job(path=send_file_path, tid=transfer_id, cleanup=is_temp):
+                        try:
+                            return udp_send_file(session, path, tid)
+                        finally:
+                            if cleanup:
+                                try:
+                                    Path(path).unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+
                     start_transfer(
                         session,
                         client_sock,
                         client_fd,
-                        lambda path=target_path, tid=transfer_id: udp_send_file(
-                            session,
-                            path,
-                            tid,
-                        ),
+                        job,
                     )
+            
 
             elif cmd in ("STOR", "APPE", "STOU"):
                 if session.mode == DataMode.MODE_NONE:
                     send_reply(client_sock, client_fd, 425, "Use PASV or PORT first.")
                     continue
+
                 metadata = parse_upload_metadata(arg)
                 if metadata is None:
-                    send_reply(client_sock, client_fd, 501, "Upload requires SIZE and SHA256.")
+                    send_reply(
+                        client_sock, client_fd, 501, "Upload requires SIZE and SHA256."
+                    )
                     continue
+
                 upload_name, expected_size, expected_hash = metadata
                 transfer_id = secrets.randbits(64)
+
                 if cmd == "STOU":
-                    unique_name = file_system.generate_unique_filename(session.current_dir, session.control_fd)
-                    target_path = os.path.join(session.current_dir, unique_name)
+                    unique_name = file_system.generate_unique_filename(
+                        session.current_dir,
+                        session.control_fd,
+                        original_filename=upload_name,
+                    )
+                    # Đi qua resolve_safe_path để đảm bảo luôn nằm trong session.root_dir
+                    valid, target_path = resolve_safe_path(
+                        session.current_dir, unique_name, session.root_dir
+                    )
+                    if not valid:
+                        send_reply(
+                            client_sock,
+                            client_fd,
+                            550,
+                            "Access denied. Generated path is invalid.",
+                        )
+                        continue
                     extra = f" FILE={unique_name}"
                 else:
-                    valid, target_path = resolve_safe_path(session.current_dir, upload_name, session.root_dir)
+                    valid, target_path = resolve_safe_path(
+                        session.current_dir, upload_name, session.root_dir
+                    )
                     if not valid:
-                        send_reply(client_sock, client_fd, 550, "Access denied. Invalid target path.")
+                        send_reply(
+                            client_sock,
+                            client_fd,
+                            550,
+                            "Access denied. Invalid target path.",
+                        )
                         continue
                     extra = ""
 
-                is_append = (cmd == "APPE")
+                is_append = cmd == "APPE"
+
                 send_reply(
                     client_sock,
                     client_fd,
                     150,
-                    f"TID={transfer_id} SIZE={expected_size} "
-                    f"SHA256={expected_hash}{extra}",
+                    f"TID={transfer_id} SIZE={expected_size} SHA256={expected_hash}{extra}",
                 )
+
                 start_transfer(
                     session,
                     client_sock,
                     client_fd,
-                    lambda path=target_path, tid=transfer_id,
-                    size=expected_size, digest=expected_hash,
-                    append=is_append: udp_receive_file(
+                    lambda path=target_path, tid=transfer_id, size=expected_size, digest=expected_hash, append=is_append: udp_receive_file(
                         session,
                         path,
                         tid,
@@ -526,15 +667,44 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
 
             elif cmd == "HELP":
                 details = {
-                    "RETR": "RETR <filename> - download a file through UDP RDT.",
-                    "STOR": "STOR <filename> - upload a file through UDP RDT.",
-                    "PASV": "PASV - select Passive data mode.",
-                    "PORT": "PORT - select Active data mode.",
-                    "ABOR": "ABOR - cancel the active data transfer.",
+                    "USER": "USER <username> - specify username for login.",
+                    "PASS": "PASS <password> - provide password to authenticate.",
+                    "PWD": "PWD - print working directory.",
+                    "CWD": "CWD <dir> - change working directory.",
+                    "CDUP": "CDUP - change to parent directory.",
+                    "MKD": "MKD <dir> - create a new directory.",
+                    "RMD": "RMD <dir> - remove a directory.",
+                    "LIST": "LIST [dir] - list directory with details (uses data connection).",
+                    "NLST": "NLST [dir] - list names only (uses data connection).",
+                    "STAT": "STAT [path] - server status or file/dir metadata.",
+                    "SIZE": "SIZE <file> - return size of the file in bytes.",
+                    "MDTM": "MDTM <file> - return modification time (YYYYMMDDhhmmss).",
+                    "TYPE": "TYPE A|I - set transfer type (ASCII or Binary).",
+                    "MODE": "MODE S - set transfer mode (Stream supported).",
+                    "PORT": "PORT h1,h2,h3,h4,p1,p2 - set active data target.",
+                    "PASV": "PASV - enter passive data mode and return UDP port.",
+                    "RETR": "RETR <file> - download a file through UDP RDT.",
+                    "STOR": "STOR <file> SIZE=<n> SHA256=<hash> - upload a file through UDP RDT.",
+                    "STOU": "STOU SIZE=<n> SHA256=<hash> - store with unique filename; server returns FILE=<name>.",
+                    "APPE": "APPE <file> SIZE=<n> SHA256=<hash> - append to existing file.",
+                    "DELE": "DELE <file> - delete a file.",
+                    "RNFR": "RNFR <from> - rename from (prepare).",
+                    "RNTO": "RNTO <to> - rename to (complete rename).",
+                    "HASH": "HASH <file> - compute SHA-256 of a file.",
+                    "ABOR": "ABOR - abort active transfer.",
+                    "NOOP": "NOOP - no operation (keepalive).",
+                    "QUIT": "QUIT - close the connection.",
+                    "HELP": "HELP [command] - show help information.",
                 }
-                if arg.upper() in details:
-                    send_reply(client_sock, client_fd, 214, details[arg.upper()])
+                if arg:
+                    key = arg.strip().upper()
                 else:
+                    key = ""
+
+                if key and key in details:
+                    send_reply(client_sock, client_fd, 214, details[key])
+                else:
+                    # Compose a friendly multi-line help summary
                     send_multiline_reply(
                         client_sock,
                         client_fd,
@@ -542,9 +712,11 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                         [
                             "Supported commands",
                             "USER PASS QUIT NOOP HELP",
-                            "PWD CWD CDUP MKD RMD LIST NLST STAT",
-                            "SIZE MDTM TYPE MODE PORT PASV",
-                            "RETR STOR STOU APPE DELE RNFR RNTO HASH ABOR",
+                            "PWD CWD CDUP MKD RMD",
+                            "LIST NLST STAT SIZE MDTM HASH",
+                            "TYPE MODE PORT PASV",
+                            "RETR STOR STOU APPE DELE",
+                            "RNFR RNTO ABOR",
                         ],
                     )
 

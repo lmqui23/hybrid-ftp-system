@@ -144,7 +144,8 @@ class FTPClient:
             file_hash = sha256_file(upload_path)
             if cmd == "STOU":
                 command_to_send = (
-                    f"STOU SIZE={size} SHA256={file_hash}"
+                    f"STOU {upload_path.name} "
+                    f"SIZE={size} SHA256={file_hash}"
                 )
             else:
                 command_to_send = (
@@ -245,11 +246,11 @@ class FTPClient:
         print("====================================================")
         print("   HYBRID FTP CLIENT CLI - READY FOR COMMANDS       ")
         print("====================================================")
-        print(" [Auth/Session]: USER, PASS, QUIT")
-        print(" [Data Mode]   : PASV, PORT, TYPE")
-        print(" [Directory]   : PWD, CWD, CDUP, MKD, RMD")
-        print(" [File/Data]   : LIST, NLST, RETR, STOR, APPE, STOU, DELE, RNFR, RNTO, ABOR")
-        print(" [Info/Meta]   : STAT, SIZE, MDTM, HASH")
+        print(" [Auth/Session] : USER, PASS, QUIT, NOOP, HELP")
+        print(" [Data Mode]    : PASV, PORT, TYPE, MODE")
+        print(" [Directory]    : PWD, CWD, CDUP, MKD, RMD")
+        print(" [File/Data]    : LIST, NLST, RETR, STOR, APPE, STOU, DELE, RNFR, RNTO, ABOR")
+        print(" [Info/Meta]    : STAT, SIZE, MDTM, HASH")
         print("====================================================\n")
 
         try:

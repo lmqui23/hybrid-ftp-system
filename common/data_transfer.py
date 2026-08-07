@@ -5,8 +5,9 @@ import threading
 import os
 import time
 from pathlib import Path
+import hashlib
 
-from common.session import DataMode, FTPSession
+from common.session import DataMode, FTPSession, TransferType
 from rdt.config import RDTConfig
 from rdt.context import TransferContext
 from rdt.fault_injector import FaultConfig, FaultInjector
@@ -109,12 +110,14 @@ def udp_send_file(
         session.transfer_context = context
         if session.abort_requested:
             context.cancel()
+
         StopAndWaitSender(
             sock,
             peer,
             context,
             _fault_injector(),
         ).send_file(file_path)
+
         return TransferResult(True, context.statistics.bytes_transferred)
     except Exception as error:
         return TransferResult(False, error_msg=str(error))
@@ -147,13 +150,23 @@ def udp_receive_file(
 ) -> TransferResult:
     sock = None
     upload_path = Path(f"{file_path}.upload.{transfer_id}")
+
     try:
         sock, _ = _server_socket_and_peer(session, sending=False)
+
         context = TransferContext(transfer_id, RDTConfig())
         session.transfer_context = context
+
         if session.abort_requested:
             context.cancel()
-        StopAndWaitReceiver(sock, context, _fault_injector()).receive_file(
+
+        is_ascii = session.type == TransferType.TYPE_ASCII
+
+        StopAndWaitReceiver(
+            sock,
+            context,
+            _fault_injector(),
+        ).receive_file(
             upload_path,
             expected_size,
             expected_hash,
@@ -161,21 +174,59 @@ def udp_receive_file(
 
         destination = Path(file_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if is_append:
-            with destination.open("ab") as output, upload_path.open("rb") as source:
-                shutil.copyfileobj(source, output)
-            upload_path.unlink()
-        else:
-            upload_path.replace(destination)
 
-        return TransferResult(True, context.statistics.bytes_transferred)
+        if is_ascii:
+            data = upload_path.read_bytes()
+
+            if expected_hash:
+                actual_hash = hashlib.sha256(data).hexdigest()
+
+                if actual_hash.lower() != expected_hash.lower():
+                    raise ValueError(
+                        f"ASCII Hash mismatch: "
+                        f"expected {expected_hash}, "
+                        f"got {actual_hash}"
+                    )
+
+            if is_append:
+                with destination.open("ab") as output:
+                    output.write(data)
+            else:
+                tmp_dest = destination.with_suffix(".tmp.ascii")
+                tmp_dest.write_bytes(data)
+                tmp_dest.replace(destination)
+
+            upload_path.unlink(missing_ok=True)
+
+        else:
+            if is_append:
+                with destination.open("ab") as output, \
+                     upload_path.open("rb") as source:
+                 shutil.copyfileobj(source, output)
+
+                upload_path.unlink()
+            else:
+                upload_path.replace(destination)
+
+        return TransferResult(
+            True,
+            context.statistics.bytes_transferred,
+        )
+
     except Exception as error:
         upload_path.unlink(missing_ok=True)
-        return TransferResult(False, error_msg=str(error))
+
+        return TransferResult(
+            False,
+            error_msg=str(error),
+        )
+
     finally:
         session.transfer_context = None
+
         if sock is not None:
             sock.close()
+
         session.pasv_udp_sock = None
         session.mode = DataMode.MODE_NONE
 
