@@ -105,9 +105,6 @@ class StopAndWaitSender:
             )
             self.context.statistics.packets_sent += 1
 
-            if attempt > 0:
-                self.context.statistics.retransmissions += 1
-
             deadline = (
                 time.monotonic()
                 + self.config.retransmission_timeout

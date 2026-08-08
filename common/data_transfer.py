@@ -315,7 +315,6 @@ def _progress(context: TransferContext, total: int, done: threading.Event) -> No
         elapsed = time.monotonic() - context.started_at
         line = (
             f"[RDT] {percent:3d}% | {transferred}/{total} bytes | "
-            f"retries={context.statistics.retransmissions} | "
             f"{elapsed:.1f}s"
         )
 
@@ -373,7 +372,7 @@ def _finish_progress(context: TransferContext, total: int) -> None:
     stats = context.statistics
     line = (
         f"[RDT] 100% | {stats.bytes_transferred}/{total} bytes | "
-        f"retries={stats.retransmissions} | {stats.duration_seconds:.3f}s"
+        f"{stats.duration_seconds:.3f}s"
     )
 
     with _print_lock:

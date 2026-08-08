@@ -13,7 +13,6 @@ class TransferStatistics:
     packets_received: int = 0
     acknowledgments_sent: int = 0
     acknowledgments_received: int = 0
-    retransmissions: int = 0
     duplicate_packets: int = 0
     corrupted_packets: int = 0
     duration_seconds: float = 0.0

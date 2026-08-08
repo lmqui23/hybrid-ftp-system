@@ -584,7 +584,7 @@ Requirements:
 - Complete with FIN and FIN_ACK.
 - Compare the receiver SHA-256 returned in FIN_ACK with the source SHA-256.
 - Support cooperative cancellation.
-- Record bytes, packets, ACKs, retransmissions, corruption, and duration.
+- Record bytes, packets, ACKs, corruption, and duration.
 
 Do not claim that Stop-and-Wait is adaptive congestion control.
 

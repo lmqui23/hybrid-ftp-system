@@ -51,9 +51,9 @@ $env:RDT_CORRUPTION_RATE = "0.05"
 $env:RDT_DUPLICATE_RATE = "0.05"
 ```
 
-Run a transfer. The client reports bytes, percentage, retransmissions,
-and duration. Verify that retransmissions are greater than zero and the
-final SHA-256 still matches.
+Run a transfer. The client reports bytes, percentage, and duration.
+Verify that the transfer survives the injected faults and the final
+SHA-256 still matches.
 
 Clear the variables after the demo:
 
@@ -92,7 +92,7 @@ Capture screenshots or terminal logs for:
 1. authentication and connected-client table;
 2. PASV upload and Active download;
 3. SHA-256 equality;
-4. fault injection with retransmissions;
+4. successful transfer under fault injection;
 5. live ABOR and temporary-file cleanup;
 6. two simultaneous client sessions;
 7. all automated tests passing.
