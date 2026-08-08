@@ -23,6 +23,9 @@ READY = b"RDT-READY"
 _input_getter: Callable[[], str] | None = None
 # Lock to synchronize progress printing and prompt redraws.
 _print_lock = threading.Lock()
+_progress_width = 0
+_progress_started = False
+_native_prompt = False
 
 
 def register_input_getter(func: Callable[[], str]) -> None:
@@ -39,6 +42,12 @@ def unregister_input_getter() -> None:
     """Remove previously registered input getter."""
     global _input_getter
     _input_getter = None
+
+
+def set_native_prompt(active: bool) -> None:
+    """Tell the progress renderer that input() owns the current prompt row."""
+    global _native_prompt
+    _native_prompt = active
 
 
 class TransferResult:
@@ -298,37 +307,103 @@ def udp_client_abort_transfer() -> None:
 
 
 def _progress(context: TransferContext, total: int, done: threading.Event) -> None:
-    # Progress printer that cooperates with a CLI input loop.
-    # It uses a print lock and optional input getter (set by client)
-    # to redraw the prompt + current buffer after printing progress.
-    global _input_getter, _print_lock
+    global _progress_width, _progress_started
+
     while not done.wait(0.25):
         transferred = context.statistics.bytes_transferred
         percent = 100 if total == 0 else min(100, transferred * 100 // total)
+        elapsed = time.monotonic() - context.started_at
         line = (
             f"[RDT] {percent:3d}% | {transferred}/{total} bytes | "
-            f"retries={context.statistics.retransmissions}"
+            f"retries={context.statistics.retransmissions} | "
+            f"{elapsed:.1f}s"
         )
+
         with _print_lock:
-            # Print progress on its own line, then redraw prompt and buffer.
-            print(f"\r{line}")
-            if _input_getter is not None:
-                buf = _input_getter()
-                # Reprint prompt and current buffer without newline.
-                print(f"ftp> {buf}", end="", flush=True)
+            width = max(_progress_width, len(line))
+            if _native_prompt:
+                if not _progress_started:
+                    # Replace the visible prompt with the first progress row,
+                    # then immediately restore a prompt below it. Using a
+                    # regular newline works reliably even at the last row of
+                    # Windows Terminal, where ANSI insert-line can hide it.
+                    print(
+                        f"\r{line:<{width}}\x1b[K\nftp> ",
+                        end="",
+                        flush=True,
+                    )
+                    _progress_started = True
+                else:
+                    print(
+                        f"\x1b[s\x1b[1A\r{line:<{width}}\x1b[K\x1b[u",
+                        end="",
+                        flush=True,
+                    )
+            elif _input_getter is None:
+                print(f"\r{line:<{width}}", end="", flush=True)
+            elif not _progress_started:
+                # Replace the existing prompt with the progress line, then
+                # keep user input on its own line below it.
+                print(
+                    f"\r{line:<{width}}\nftp> {_input_getter()}",
+                    end="",
+                    flush=True,
+                )
+                _progress_started = True
+            else:
+                # The cursor remains on the input row. Update only the row
+                # above it, then restore and redraw the current input.
+                buffer = _input_getter()
+                prompt_width = max(
+                    shutil.get_terminal_size((120, 20)).columns - 1,
+                    len(buffer) + 5,
+                )
+                print(
+                    f"\x1b[1A\r{line:<{width}}"
+                    f"\x1b[1B\r{' ' * prompt_width}\rftp> {buffer}",
+                    end="",
+                    flush=True,
+                )
+            _progress_width = len(line)
 
 
 def _finish_progress(context: TransferContext, total: int) -> None:
+    global _progress_width, _progress_started
+
     stats = context.statistics
     line = (
         f"[RDT] 100% | {stats.bytes_transferred}/{total} bytes | "
         f"retries={stats.retransmissions} | {stats.duration_seconds:.3f}s"
     )
+
     with _print_lock:
-        print(line)
-        if _input_getter is not None:
-            buf = _input_getter()
-            print(f"ftp> {buf}", end="", flush=True)
+        width = max(_progress_width, len(line))
+        if _native_prompt and _progress_started:
+            print(
+                f"\x1b[s\x1b[1A\r{line:<{width}}\x1b[K\x1b[u",
+                end="",
+                flush=True,
+            )
+        elif _progress_started and _input_getter is not None:
+            buffer = _input_getter()
+            if buffer:
+                print(
+                    f"\x1b[1A\r{line:<{width}}\x1b[1B\rftp> {buffer}",
+                    end="",
+                    flush=True,
+                )
+            else:
+                prompt_width = shutil.get_terminal_size((120, 20)).columns - 1
+                print(
+                    f"\x1b[1A\r{line:<{width}}\x1b[1B\r"
+                    f"{' ' * prompt_width}\r",
+                    end="",
+                    flush=True,
+                )
+        else:
+            print(f"\r{line:<{width}}", flush=True)
+        _progress_width = 0
+        _progress_started = False
 
 
 def udp_client_set_passive(ip: str, port: int) -> None:

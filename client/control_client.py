@@ -21,6 +21,7 @@ from common.data_transfer import (
     udp_client_abort_transfer,
     register_input_getter,
     unregister_input_getter,
+    set_native_prompt,
     _print_lock,
 )
 
@@ -289,16 +290,25 @@ class FTPClient:
         #   side transfer context.
         # Use per-character input on Windows to avoid blocking issues with
         # threaded progress printing. On other platforms fall back to input().
-        if os.name == "nt":
+        # Use the terminal's native line editor by default. On Windows this
+        # restores input(), including its built-in arrow-key command history,
+        # while transfers remain on a background thread so ABOR is available.
+        # Raw per-character input is retained only as an explicit diagnostic
+        # fallback via FTP_RAW_INPUT=1.
+        use_raw_input = os.getenv("FTP_RAW_INPUT") == "1"
+        if os.name == "nt" and use_raw_input:
             import msvcrt
 
             try:
+                prompt_needed = True
                 while self.connected:
-                    # Print prompt if buffer is empty and at line start.
-                    with self._buffer_lock:
-                        if self._current_buffer == "":
-                            with _print_lock:
-                                print("ftp> ", end="", flush=True)
+                    # Print exactly one prompt for each input cycle. Buffer
+                    # emptiness alone cannot indicate whether a prompt is
+                    # already visible (for example after Backspace).
+                    if prompt_needed:
+                        with _print_lock:
+                            print("ftp> ", end="", flush=True)
+                        prompt_needed = False
 
                     ch = msvcrt.getwch()
 
@@ -309,6 +319,7 @@ class FTPClient:
                         with self._buffer_lock:
                             user_input = self._current_buffer.strip()
                             self._current_buffer = ""
+                        prompt_needed = True
 
                         if not user_input:
                             continue
@@ -413,6 +424,10 @@ class FTPClient:
                                 with _print_lock:
                                     print("\b \b", end="", flush=True)
 
+                    elif ch in ("\x00", "\xe0"):
+                        # Consume the second byte of a Windows extended key.
+                        msvcrt.getwch()
+
                     else:
                         # Regular character - append and echo it
                         with self._buffer_lock:
@@ -429,7 +444,14 @@ class FTPClient:
                     pass
 
         else:
-            # Fallback for non-Windows systems: use blocking input()
+            # Native blocking input is intentional: it provides the same line
+            # editing and history behavior as the original client. It blocks
+            # only this CLI loop; the active transfer continues in its thread.
+            try:
+                unregister_input_getter()
+            except Exception:
+                pass
+            set_native_prompt(True)
             try:
                 while self.connected:
                     user_input = input("ftp> ").strip()
@@ -508,6 +530,7 @@ class FTPClient:
                 print("\n[Client] Interrupted by user.")
                 self.disconnect()
             finally:
+                set_native_prompt(False)
                 try:
                     unregister_input_getter()
                 except Exception:
