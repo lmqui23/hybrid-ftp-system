@@ -6,6 +6,7 @@ import threading
 import hashlib
 from pathlib import Path
 import secrets
+import signal
 
 # Thêm đường dẫn gốc của dự án và thư mục hiện tại vào sys.path
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,7 @@ BUFFER_SIZE = 1024
 ACTIVE_SESSIONS: dict[int, FTPSession] = {}
 SESSIONS_LOCK = threading.Lock()
 REPLY_LOCKS: dict[int, threading.Lock] = {}
+SHUTDOWN_EVENT = threading.Event()
 
 def get_current_timestamp() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -755,24 +757,45 @@ def main():
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+    def _signal_handler(signum, frame):
+        # Mark shutdown requested; main loop will exit gracefully.
+        print(f"\n[{get_current_timestamp()}] [INFO] [SERVER] Received signal {signum}, shutting down...")
+        SHUTDOWN_EVENT.set()
+
+    # Register SIGINT handler so Ctrl-C sets the shutdown event reliably.
+    try:
+        signal.signal(signal.SIGINT, _signal_handler)
+    except Exception:
+        # On some platforms or embeded environments signal registration may fail.
+        pass
+
     try:
         server_sock.bind(("0.0.0.0", CONTROL_PORT))
         server_sock.listen(5)
+        server_sock.settimeout(1.0)
         print(f"[{get_current_timestamp()}] [INFO] [SERVER] TCP Control Engine listening on port {CONTROL_PORT}...")
 
-        while True:
-            client_sock, (client_ip, client_port) = server_sock.accept()
+        while not SHUTDOWN_EVENT.is_set():
+            try:
+                client_sock, (client_ip, client_port) = server_sock.accept()
+            except socket.timeout:
+                continue
+            except KeyboardInterrupt:
+                SHUTDOWN_EVENT.set()
+                break
+
             client_thread = threading.Thread(
                 target=handle_client_session,
                 args=(client_sock, client_ip, client_port),
-                daemon=True
+                daemon=True,
             )
             client_thread.start()
 
-    except KeyboardInterrupt:
-        print("\n[SERVER] Server shutting down gracefully...")
     finally:
-        server_sock.close()
+        try:
+            server_sock.close()
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
