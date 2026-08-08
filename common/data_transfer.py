@@ -6,6 +6,7 @@ import os
 import time
 from pathlib import Path
 import hashlib
+from typing import Callable
 
 from common.session import DataMode, FTPSession, TransferType
 from rdt.config import RDTConfig
@@ -16,6 +17,28 @@ from rdt.sender import StopAndWaitSender
 
 
 READY = b"RDT-READY"
+
+# Optional hook used by a CLI to fetch the current input buffer so
+# progress printing can redraw the prompt without corrupting user input.
+_input_getter: Callable[[], str] | None = None
+# Lock to synchronize progress printing and prompt redraws.
+_print_lock = threading.Lock()
+
+
+def register_input_getter(func: Callable[[], str]) -> None:
+    """Register a callable that returns the current CLI input buffer.
+
+    The progress printer will call this to redraw the prompt while
+    preserving user-typed characters.
+    """
+    global _input_getter
+    _input_getter = func
+
+
+def unregister_input_getter() -> None:
+    """Remove previously registered input getter."""
+    global _input_getter
+    _input_getter = None
 
 
 class TransferResult:
@@ -270,23 +293,37 @@ def udp_client_abort_transfer() -> None:
 
 
 def _progress(context: TransferContext, total: int, done: threading.Event) -> None:
+    # Progress printer that cooperates with a CLI input loop.
+    # It uses a print lock and optional input getter (set by client)
+    # to redraw the prompt + current buffer after printing progress.
+    global _input_getter, _print_lock
     while not done.wait(0.25):
         transferred = context.statistics.bytes_transferred
         percent = 100 if total == 0 else min(100, transferred * 100 // total)
-        print(
-            f"\r[RDT] {percent:3d}% | {transferred}/{total} bytes | "
-            f"retries={context.statistics.retransmissions}",
-            end="",
-            flush=True,
+        line = (
+            f"[RDT] {percent:3d}% | {transferred}/{total} bytes | "
+            f"retries={context.statistics.retransmissions}"
         )
+        with _print_lock:
+            # Print progress on its own line, then redraw prompt and buffer.
+            print(f"\r{line}")
+            if _input_getter is not None:
+                buf = _input_getter()
+                # Reprint prompt and current buffer without newline.
+                print(f"ftp> {buf}", end="", flush=True)
 
 
 def _finish_progress(context: TransferContext, total: int) -> None:
     stats = context.statistics
-    print(
-        f"\r[RDT] 100% | {stats.bytes_transferred}/{total} bytes | "
+    line = (
+        f"[RDT] 100% | {stats.bytes_transferred}/{total} bytes | "
         f"retries={stats.retransmissions} | {stats.duration_seconds:.3f}s"
     )
+    with _print_lock:
+        print(line)
+        if _input_getter is not None:
+            buf = _input_getter()
+            print(f"ftp> {buf}", end="", flush=True)
 
 
 def udp_client_set_passive(ip: str, port: int) -> None:

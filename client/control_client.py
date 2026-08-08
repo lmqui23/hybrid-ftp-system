@@ -18,6 +18,9 @@ from common.data_transfer import (
     udp_client_prepare_active,
     udp_client_set_passive,
     udp_client_abort_transfer,
+    register_input_getter,
+    unregister_input_getter,
+    _print_lock,
 )
 
 DEFAULT_PORT = 2121
@@ -32,6 +35,13 @@ class FTPClient:
         self.data_mode: str | None = None
         self.reader = None
         self.transfer_thread: threading.Thread | None = None
+        # Current input buffer (used for prompt redraw while progress prints)
+        self._current_buffer = ""
+        self._buffer_lock = threading.Lock()
+
+    def _get_input_buffer(self) -> str:
+        with self._buffer_lock:
+            return self._current_buffer
 
     @staticmethod
     def _parse_transfer_metadata(response: str):
@@ -253,57 +263,192 @@ class FTPClient:
         print(" [Info/Meta]    : STAT, SIZE, MDTM, HASH")
         print("====================================================\n")
 
+        # Try to register input getter for progress redraws. If unavailable,
+        # progress printing will not attempt to redraw the prompt.
         try:
-            while self.connected:
-                user_input = input("ftp> ").strip()
-                if not user_input:
-                    continue
+            register_input_getter(self._get_input_buffer)
+        except Exception:
+            pass
 
-                parts = user_input.split()
-                cmd = parts[0].upper()
+        # Implementation note:
+        # - Main thread runs a simple per-character input loop (Windows via
+        #   `msvcrt.getwch`) which does NOT echo characters automatically.
+        #   The client maintains `self._current_buffer` (protected by
+        #   `self._buffer_lock`) and echoes characters under the shared
+        #   `_print_lock` so progress printing (which also takes
+        #   `_print_lock`) cannot interleave and corrupt the prompt.
+        # - Data thread(s) performing UDP RDT transfers spawn a monitor
+        #   thread that calls `common.data_transfer._progress`. That
+        #   function calls the registered input getter to obtain the
+        #   current buffer and redraw the prompt, giving a smooth CLI UX
+        #   while transfers show progress.
+        # - Sending `ABOR` simply sends the TCP control command and calls
+        #   `udp_client_abort_transfer()` to cancel the RDT transfer context
+        #   locally; the server also receives `ABOR` and cancels the server
+        #   side transfer context.
+        # Use per-character input on Windows to avoid blocking issues with
+        # threaded progress printing. On other platforms fall back to input().
+        if os.name == "nt":
+            import msvcrt
 
-                transfer_running = (
-                    self.transfer_thread is not None
-                    and self.transfer_thread.is_alive()
-                )
+            try:
+                while self.connected:
+                    # Print prompt if buffer is empty and at line start.
+                    with self._buffer_lock:
+                        if self._current_buffer == "":
+                            with _print_lock:
+                                print("ftp> ", end="", flush=True)
 
-                if cmd == "ABOR" and transfer_running:
-                    if self._send_command("ABOR"):
-                        udp_client_abort_transfer()
-                        print("[Client] Abort requested.")
-                    continue
+                    ch = msvcrt.getwch()
 
-                if transfer_running:
-                    print("[Client] Transfer in progress. Use ABOR or wait.")
-                    continue
+                    if ch == "\r":
+                        # Enter pressed
+                        with _print_lock:
+                            print()
+                        with self._buffer_lock:
+                            user_input = self._current_buffer.strip()
+                            self._current_buffer = ""
 
-                if cmd in ("EXIT", "QUIT"):
-                    self.disconnect()
-                    break
+                        if not user_input:
+                            continue
 
-                if cmd == "PASV":
-                    self._enter_passive()
-                elif cmd == "PORT":
-                    self._enter_active()
-                elif cmd in ("LIST", "NLST", "RETR", "STOR", "APPE", "STOU"):
-                    self.transfer_thread = threading.Thread(
-                        target=self._run_transfer,
-                        args=(user_input,),
-                        daemon=True,
-                    )
-                    self.transfer_thread.start()
-                else:
-                    if self._send_command(user_input):
-                        response = self._receive_response()
-                        if not response:
-                            print("[Client] Server closed the connection.")
+                        parts = user_input.split()
+                        cmd = parts[0].upper()
+
+                        transfer_running = (
+                            self.transfer_thread is not None
+                            and self.transfer_thread.is_alive()
+                        )
+
+                        # Immediate abort request handling
+                        if cmd == "ABOR" and transfer_running:
+                            if self._send_command("ABOR"):
+                                udp_client_abort_transfer()
+                                with _print_lock:
+                                    print("[Client] Abort requested.")
+                            continue
+
+                        # If any transfer is running, other commands (except ABOR) are deferred
+                        if transfer_running:
+                            with _print_lock:
+                                print("[Client] Transfer in progress. Use ABOR or wait.")
+                            continue
+
+                        # Normal command handling
+                        if cmd in ("EXIT", "QUIT"):
+                            self.disconnect()
                             break
-                        print(response, end="")
+
+                        if cmd == "PASV":
+                            self._enter_passive()
+                        elif cmd == "PORT":
+                            self._enter_active()
+                        elif cmd in ("LIST", "NLST", "RETR", "STOR", "APPE", "STOU"):
+                            self.transfer_thread = threading.Thread(
+                                target=self._run_transfer,
+                                args=(user_input,),
+                                daemon=True,
+                            )
+                            self.transfer_thread.start()
+                        else:
+                            if self._send_command(user_input):
+                                response = self._receive_response()
+                                if not response:
+                                    with _print_lock:
+                                        print("[Client] Server closed the connection.")
+                                    break
+                                with _print_lock:
+                                    print(response, end="")
+                            else:
+                                with _print_lock:
+                                    print("[Error] Failed to send command!")
+
+                    elif ch == "\x03":
+                        # Ctrl-C
+                        raise KeyboardInterrupt
+
+                    elif ch == "\x08":
+                        # Backspace
+                        with self._buffer_lock:
+                            if self._current_buffer:
+                                self._current_buffer = self._current_buffer[:-1]
+                                # Erase last char from console
+                                with _print_lock:
+                                    print("\b \b", end="", flush=True)
+
                     else:
-                        print("[Error] Failed to send command!")
-        except KeyboardInterrupt:
-            print("\n[Client] Interrupted by user.")
-            self.disconnect()
+                        # Regular character - append and echo it
+                        with self._buffer_lock:
+                            self._current_buffer += ch
+                            with _print_lock:
+                                print(ch, end="", flush=True)
+            except KeyboardInterrupt:
+                print("\n[Client] Interrupted by user.")
+                self.disconnect()
+            finally:
+                try:
+                    unregister_input_getter()
+                except Exception:
+                    pass
+
+        else:
+            # Fallback for non-Windows systems: use blocking input()
+            try:
+                while self.connected:
+                    user_input = input("ftp> ").strip()
+                    if not user_input:
+                        continue
+
+                    parts = user_input.split()
+                    cmd = parts[0].upper()
+
+                    transfer_running = (
+                        self.transfer_thread is not None
+                        and self.transfer_thread.is_alive()
+                    )
+
+                    if cmd == "ABOR" and transfer_running:
+                        if self._send_command("ABOR"):
+                            udp_client_abort_transfer()
+                            print("[Client] Abort requested.")
+                        continue
+
+                    if transfer_running:
+                        print("[Client] Transfer in progress. Use ABOR or wait.")
+                        continue
+
+                    if cmd in ("EXIT", "QUIT"):
+                        self.disconnect()
+                        break
+
+                    if cmd == "PASV":
+                        self._enter_passive()
+                    elif cmd == "PORT":
+                        self._enter_active()
+                    elif cmd in ("LIST", "NLST", "RETR", "STOR", "APPE", "STOU"):
+                        self.transfer_thread = threading.Thread(
+                            target=self._run_transfer,
+                            args=(user_input,),
+                            daemon=True,
+                        )
+                        self.transfer_thread.start()
+                    else:
+                        if self._send_command(user_input):
+                            response = self._receive_response()
+                            if not response:
+                                print("[Client] Server closed the connection.")
+                                break
+                            print(response, end="")
+                        else:
+                            print("[Error] Failed to send command!")
+            except KeyboardInterrupt:
+                print("\n[Client] Interrupted by user.")
+                self.disconnect()
+            finally:
+                try:
+                    unregister_input_getter()
+                except Exception:
+                    pass
 
 
 def main():
