@@ -351,6 +351,16 @@ def udp_client_prepare_active(local_ip: str) -> tuple[str, int]:
     return _client_socket.getsockname()
 
 
+def udp_client_set_active(local_ip: str, port: int) -> None:
+   
+    global _client_socket, _client_mode, _client_abort_requested
+    _close_client_socket()
+    _client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    _client_socket.bind((local_ip, port))
+    _client_mode = DataMode.MODE_ACTIVE
+    _client_abort_requested = False
+
+
 def _client_receiver(transfer_id: int) -> StopAndWaitReceiver:
     global _client_context
     if _client_socket is None:

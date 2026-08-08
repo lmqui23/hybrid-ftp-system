@@ -261,26 +261,35 @@ def handle_client_session(client_sock: socket.socket, client_ip: str, client_por
                 send_reply(client_sock, client_fd, 227, pasv_msg)
 
             elif cmd == "PORT":
-                port_args = arg.replace(',', ' ').split()
-                if len(port_args) == 6:
-                    try:
-                        h1, h2, h3, h4, p1, p2 = map(int, port_args)
-                        if not all(0 <= h <= 255 for h in (h1, h2, h3, h4)):
-                            send_reply(client_sock, client_fd, 501, "Invalid IP or Port range.")
-                            continue
-
-                        port = p1 * 256 + p2
-                        if port < 1024 or port > 65535:
-                            send_reply(client_sock, client_fd, 501, "Port number must be >= 1024.")
-                            continue
-
-                        ip = f"{h1}.{h2}.{h3}.{h4}"
-                        udp_set_active_target(session, ip, port)
-                        send_reply(client_sock, client_fd, 200, "PORT command successful.")
-                    except ValueError:
-                        send_reply(client_sock, client_fd, 501, "Syntax error in IP/PORT.")
-                else:
+                # Strict parsing: require exactly six comma-separated numeric parts
+                # in the form h1,h2,h3,h4,p1,p2 (no extra tokens).
+                if not arg or arg.count(',') != 5:
                     send_reply(client_sock, client_fd, 501, "Syntax error in IP/PORT.")
+                    continue
+
+                parts = [part.strip() for part in arg.split(',')]
+                if len(parts) != 6:
+                    send_reply(client_sock, client_fd, 501, "Syntax error in IP/PORT.")
+                    continue
+
+                try:
+                    h1, h2, h3, h4, p1, p2 = map(int, parts)
+                except ValueError:
+                    send_reply(client_sock, client_fd, 501, "Syntax error in IP/PORT.")
+                    continue
+
+                if not all(0 <= h <= 255 for h in (h1, h2, h3, h4)):
+                    send_reply(client_sock, client_fd, 501, "Invalid IP or Port range.")
+                    continue
+
+                port = p1 * 256 + p2
+                if port < 1024 or port > 65535:
+                    send_reply(client_sock, client_fd, 501, "Port number must be >= 1024.")
+                    continue
+
+                ip = f"{h1}.{h2}.{h3}.{h4}"
+                udp_set_active_target(session, ip, port)
+                send_reply(client_sock, client_fd, 200, "PORT command successful.")
 
             elif cmd == "TYPE":
                 if arg in ("A", "a"):

@@ -16,6 +16,7 @@ from common.data_transfer import (
     udp_client_receive_file,
     udp_client_send_file,
     udp_client_prepare_active,
+    udp_client_set_active,
     udp_client_set_passive,
     udp_client_abort_transfer,
     register_input_getter,
@@ -342,7 +343,43 @@ class FTPClient:
                         if cmd == "PASV":
                             self._enter_passive()
                         elif cmd == "PORT":
-                            self._enter_active()
+                            # Require explicit arguments for PORT: PORT h1,h2,h3,h4,p1,p2
+                            if len(parts) > 1 and parts[1].strip():
+                                arg = parts[1].strip()
+                                # Validate and prepare local active socket before sending
+                                if arg.count(',') == 5:
+                                    try:
+                                        h1, h2, h3, h4, p1, p2 = map(int, [x.strip() for x in arg.split(',')])
+                                        ip = f"{h1}.{h2}.{h3}.{h4}"
+                                        port = p1 * 256 + p2
+                                        # Prepare local UDP socket bound to advertised address
+                                        try:
+                                            udp_client_set_active(ip, port)
+                                        except Exception as e:
+                                            with _print_lock:
+                                                print(f"[Client] Failed to bind local UDP {ip}:{port}: {e}")
+                                            continue
+                                        # send PORT command
+                                        if self._send_command(user_input):
+                                            response = self._receive_response()
+                                            if not response:
+                                                with _print_lock:
+                                                    print("[Client] Server closed the connection.")
+                                                break
+                                            with _print_lock:
+                                                print(response, end="")
+                                            # mark client data mode active locally if server accepted
+                                            if self._get_response_code(response) == 200:
+                                                self.data_mode = "PORT"
+                                    except ValueError:
+                                        with _print_lock:
+                                            print("[Client] Syntax error in PORT arguments.")
+                                else:
+                                    with _print_lock:
+                                        print("[Client] Usage: PORT h1,h2,h3,h4,p1,p2")
+                            else:
+                                with _print_lock:
+                                    print("[Client] Usage: PORT h1,h2,h3,h4,p1,p2")
                         elif cmd in ("LIST", "NLST", "RETR", "STOR", "APPE", "STOU"):
                             self.transfer_thread = threading.Thread(
                                 target=self._run_transfer,
@@ -424,7 +461,33 @@ class FTPClient:
                     if cmd == "PASV":
                         self._enter_passive()
                     elif cmd == "PORT":
-                        self._enter_active()
+                        # blocking path: same handling as above
+                        if len(parts) > 1 and parts[1].strip():
+                            arg = parts[1].strip()
+                            if arg.count(',') == 5:
+                                try:
+                                    h1, h2, h3, h4, p1, p2 = map(int, [x.strip() for x in arg.split(',')])
+                                    ip = f"{h1}.{h2}.{h3}.{h4}"
+                                    port = p1 * 256 + p2
+                                    try:
+                                        udp_client_set_active(ip, port)
+                                    except Exception as e:
+                                        print(f"[Client] Failed to bind local UDP {ip}:{port}: {e}")
+                                        continue
+                                    if self._send_command(user_input):
+                                        response = self._receive_response()
+                                        if not response:
+                                            print("[Client] Server closed the connection.")
+                                            break
+                                        print(response, end="")
+                                        if self._get_response_code(response) == 200:
+                                            self.data_mode = "PORT"
+                                except ValueError:
+                                    print("[Client] Syntax error in PORT arguments.")
+                            else:
+                                print("[Client] Usage: PORT h1,h2,h3,h4,p1,p2")
+                        else:
+                            print("[Client] Usage: PORT h1,h2,h3,h4,p1,p2")
                     elif cmd in ("LIST", "NLST", "RETR", "STOR", "APPE", "STOU"):
                         self.transfer_thread = threading.Thread(
                             target=self._run_transfer,
