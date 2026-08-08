@@ -199,11 +199,13 @@ def udp_receive_file(
         destination.parent.mkdir(parents=True, exist_ok=True)
 
         if is_ascii:
+            # Read raw uploaded bytes (network form, typically using CRLF).
             data = upload_path.read_bytes()
 
+            # Verify hash against raw network bytes first (expected_hash
+            # is assumed to be computed on the network form).
             if expected_hash:
                 actual_hash = hashlib.sha256(data).hexdigest()
-
                 if actual_hash.lower() != expected_hash.lower():
                     raise ValueError(
                         f"ASCII Hash mismatch: "
@@ -211,12 +213,15 @@ def udp_receive_file(
                         f"got {actual_hash}"
                     )
 
+            # Only after verification, convert CRLF -> LF for storage.
+            converted = data.replace(b"\r\n", b"\n")
+
             if is_append:
                 with destination.open("ab") as output:
-                    output.write(data)
+                    output.write(converted)
             else:
                 tmp_dest = destination.with_suffix(".tmp.ascii")
-                tmp_dest.write_bytes(data)
+                tmp_dest.write_bytes(converted)
                 tmp_dest.replace(destination)
 
             upload_path.unlink(missing_ok=True)
